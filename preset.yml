@@ -1,0 +1,3 @@
+name: 极简二阶模式
+description: 梁神两阶段锚定的极简移植：阶段1以双工具+单行persona锚定推理轨迹（无输出token上限），晋升后只开放完整工具目录，提示词保持极简不增一字。注意：阶段1会丢弃goal/定时任务等非用户注入消息；bash需完全访问沙箱；模型无cwd上下文需自行pwd。Git Bash 后端，Windows 原生。
+order: 7

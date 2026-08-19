@@ -1,0 +1,246 @@
+# The `minimal-two-stage` (极简二阶模式) agent preset: the liangshen two-phase
+# anchor bootstrap ported onto the minimal-gitbash base. Its two DEFINING
+# differences from the `minimal-plus` sibling:
+#
+# 1. Phase 2 opens the FULL tool catalog but adds NOTHING to the prompt. The
+#    persona row keeps minimal-gitbash's `complete: true` +
+#    `includeRuntimeContext: false`, so the system prompt stays the exact
+#    one-line persona in both phases; the only thing promotion changes is the
+#    tool list (2 tools -> full catalog, native presentation). minimal-plus,
+#    by contrast, restores the whole prompt assembly and switches to Code
+#    Mode (PTC) after promotion.
+# 2. The phase-1 output cap is REMOVED: `bootstrapMaxTokens` is deliberately
+#    absent from the tool-bootstrap config, so phase-1 requests run at the
+#    adapter default (256000) instead of the 1024 anchor budget.
+#
+# COMPLETE difference list vs minimal-plus (audited): the two defining
+# differences above imply every other divergence. Concretely, relative to
+# minimal-plus this preset (a) adds `complete: true` +
+# `includeRuntimeContext: false` to the persona row, (b) sets
+# `promotedPresentation: native` (Code Mode's PTC would inject an SDK prompt
+# section), (c) sets `workspaceLine: false` (a local tool-bootstrap option
+# that skips the promoted cwd append), (d) sets `deferredSources: []` and
+# `deferredGraceSteps: 0`, (e) drops `agent-instructions`, the two skill
+# rows, `plan-mode`, and `reasoning-style` — every row that would inject
+# prompt text in phase 2, and (f) omits `bootstrapMaxTokens`.
+#
+# BEHAVIOR CONTRACTS (must be disclosed to users):
+# - Phase-1 message filter drops ALL non-user injected messages permanently
+#   (goal continuations, task-board timer injections, time-context,
+#   subagent reports): inbox claims are pure deletions and the filter keeps
+#   only `kind: 'user'`. A turn carrying only injected messages completes
+#   empty. Inherited verbatim from the liangshen filter.
+# - The model never sees cwd / sandbox / approval context in either phase
+#   (complete persona + no runtime context + no workspace line); it must
+#   discover the workspace itself (e.g. `pwd`).
+# - The gitbash executor gates commands on the danger-full-access policy as a
+#   BINARY refusal: outside full access every command throws instead of
+#   running under a restricted token (MSYS cannot initialize in the Windows
+#   sandbox). Under danger-full-access + disabled approvals, bash is fully
+#   unconstrained.
+# - `tool-subagent-fork` is `one-shot` (no `send_message` continuation),
+#   faithful to the liangshen source preset; shipped presets use
+#   `continuable`.
+# - Phase-1 requests run at the adapter-default 256000 output cap (no fixed
+#   anchor budget), and the anchor gate's `we` probe is English-only with
+#   `promoteAfterFirstResponse` releasing the gate at first response/turn
+#   end — inherited liangshen semantics, relaxed for Chinese/pure-chat use.
+#
+# Phase 1 (anchoring): only `bash` (Git Bash via gitbash-executor) plus
+# `str_replace_editor`, only the one-line persona, no runtime contexts, and
+# only direct user messages. Promotion: first reasoning block containing `we`
+# and no `let me`, or the 4-step fallback; a tool-less first response promotes
+# automatically.
+#
+# Shell: the MSYS runtime cannot initialize inside the Windows restricted-
+# token sandbox, so the executor gates commands on the danger-full-access
+# policy — switch the session to full access, or let the model retry a single
+# command with sandbox_permissions: "danger-full-access" + justification.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# Both phases show only this one-line persona: `complete: true` suppresses
+# every other prompt section and `includeRuntimeContext: false` suppresses the
+# runtime context snapshot, so promotion never adds prompt text — only tools.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are a helpful software engineer assistant.
+    complete: true
+    includeRuntimeContext: false
+
+# Two-phase input bootstrap with the exact Minimal phase-1 tools. Before the
+# first durable tool/call event the model sees only `bash` plus
+# `str_replace_editor`, only the `persona` prompt section, no runtime
+# contexts, and only direct user messages. `anchorGate` holds the promotion
+# open until the first reasoning block is minimal-like (four-step fallback);
+# `promoteAfterFirstResponse` avoids a permanent two-tool session after a
+# tool-less first response. `bootstrapMaxTokens` is omitted on purpose: this
+# preset has NO phase-1 output cap (unlike liangshen / minimal-plus).
+# `promotedPresentation: native` keeps the full catalog as ordinary tools —
+# Code Mode's PTC would inject an SDK prompt section, which this preset's
+# "tools only, no new prompt" contract forbids. `workspaceLine: false` (a
+# local minimal-two-stage option) skips the promoted cwd append for the same
+# reason. `deferredSources` is empty because the prompt-injecting sources
+# (workspace instructions, skill catalog) are not mounted at all.
+- id: tool-bootstrap
+  name: ./tool-bootstrap.mjs
+  config:
+    shellTools: [bash]
+    commonTools: [str_replace_editor]
+    messageSources: [user]
+    anchorGate: true
+    maxBootstrapSteps: 4
+    promoteAfterFirstResponse: true
+    compactionTools: [read, write, edit, glob, grep, todo_write, ask_user_question]
+    deferredSources: []
+    deferredGraceSteps: 0
+    promotedPresentation: native
+    workspaceLine: false
+
+# ── shell (gitbash-executor, Windows compatible) ──────────────────────────
+
+# The shell provider is an agent-owned service in an entry-local realm. The
+# executor spawns Git Bash (`bash.exe -c <command>`) through the host
+# subprocess service — a fresh shell per call, no PTY dependency. The
+# executor gates commands on the danger-full-access policy (see header).
+- id: gitbash-shell
+  name: cordis:group
+  group: true
+  disabled: !!js process.platform !== 'win32'
+  isolate:
+    shell: true
+  config:
+    - id: gitbash-executor
+      name: ./gitbash-executor.mjs
+      config:
+        timeoutMs: 120000
+        maxTimeoutMs: 600000
+        maxOutputBytes: 64000
+        maxSpillBytes: 67108864
+        graceMs: 3000
+
+    - id: tool-bash
+      name: '@deepseek-ai/dsh-tool-bash'
+      config:
+        enableRunInBackground: false
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+# Phase-1 editor as a direct top-level row: it reuses the host's sandboxed
+# `ctx.fs` (the liangshen pattern), so the sandbox policy is respected and no
+# bare `dsh-fs-local` realm is mounted.
+- id: str-replace-editor
+  name: '@deepseek-ai/dsh-tool-str-replace-editor'
+  config:
+    maxOutputChars: 16000
+
+# ── standard filesystem tools ───────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# Compaction produces an operational history summary, not static prompt
+# guidance, so it does not violate the "no new prompt" contract and keeps
+# long full-catalog sessions inside the context window. `compaction-basic`
+# reads `toolResultPrune` through `ctx.get`, so the pruner shares this realm.
+# A `compaction/end` event makes tool-bootstrap reset the session to the
+# controlled phase (bootstrap pair + `compactionTools`) until a NEW promotion
+# signal exists past the boundary.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+# The `subagents` registry and its backends live in the host composition; this
+# preset contributes the delegation TOOLS. `workflows` is agent-owned, so its
+# provider and consumers share one entry-local realm.
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: one-shot
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+      config:
+        subagentProvider: spawn
+        maxRounds: 64
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000

@@ -1,0 +1,6 @@
+agent.cordis.yml 改编自 DeepSeek Harness 内置 Minimal 与 Standard preset（MIT），
+并参考 dsh-liangshen 与 dsh-minimal-plus 的组合结构。
+tool-bootstrap.mjs 来自 https://github.com/xiaobright/dsh-anchored-standard（MIT），
+经 dsh-liangshen 的两阶段隔离扩展后复制，本预设追加 workspaceLine 关闭选项。
+gitbash-executor.mjs 来自 https://github.com/liceses/dsh-gitbash-preset（MIT）。
+原始 DeepSeek 版权和 MIT 许可声明见各开源仓库。
